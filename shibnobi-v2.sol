@@ -14,8 +14,8 @@
  *                                                                           
 */                                                                           
 
-// Shibnobi ETH
-// Version: 20221026001
+// Shibnobi V2
+// Version: 20221103001
 // Website: www.shibnobi.com
 // Twitter: https://twitter.com/Shib_nobi (@Shib_nobi)
 // TG: https://t.me/ShibnobiCommunity
@@ -23,9 +23,7 @@
 // Instagram: https://www.instagram.com/shibnobi/
 // Medium: https://medium.com/@Shibnobi
 // Reddit: https://www.reddit.com/r/Shibnobi/
-// Discord: https://discord.gg/shibnobi
 
-// SPDX-License-Identifier: MIT
 pragma solidity 0.8.17;
 
 interface IUniswapRouter01 {
@@ -876,8 +874,7 @@ contract ERC20 is Context, IERC20, IERC20Metadata {
         override
         returns (bool)
     {
-        address owner = _msgSender();
-        _transfer(owner, to, amount);
+        _transfer(msg.sender, to, amount);
         return true;
     }
 
@@ -910,8 +907,7 @@ contract ERC20 is Context, IERC20, IERC20Metadata {
         override
         returns (bool)
     {
-        address owner = _msgSender();
-        _approve(owner, spender, amount);
+        _approve(msg.sender, spender, amount);
         return true;
     }
 
@@ -959,8 +955,7 @@ contract ERC20 is Context, IERC20, IERC20Metadata {
         virtual
         returns (bool)
     {
-        address owner = _msgSender();
-        _approve(owner, spender, allowance(owner, spender) + addedValue);
+        _approve(msg.sender, spender, allowance(msg.sender, spender) + addedValue);
         return true;
     }
 
@@ -983,14 +978,13 @@ contract ERC20 is Context, IERC20, IERC20Metadata {
         virtual
         returns (bool)
     {
-        address owner = _msgSender();
-        uint256 currentAllowance = allowance(owner, spender);
+        uint256 currentAllowance = allowance(msg.sender, spender);
         require(
             currentAllowance >= subtractedValue,
             "ERC20: decreased allowance below zero"
         );
         unchecked {
-            _approve(owner, spender, currentAllowance - subtractedValue);
+            _approve(msg.sender, spender, currentAllowance - subtractedValue);
         }
 
         return true;
@@ -1175,7 +1169,7 @@ contract ERC20 is Context, IERC20, IERC20Metadata {
     ) internal virtual {}
 }
 
-interface uniswapV2Pair {
+interface IUniswapV2Pair {
     function getReserves()
         external
         view
@@ -1186,28 +1180,17 @@ interface uniswapV2Pair {
         );
 }
 
-contract ShibnobiV2 is ERC20, Ownable {
+contract Shibnobi is ERC20, Ownable {
     address payable public marketingFeeAddress;
     address payable public stakingFeeAddress;
 
     uint16 constant feeDenominator = 1000;
+    uint16 constant lpDenominator = 1000;
     uint16 constant maxFeeLimit = 300;
 
     bool public tradingActive;
 
     mapping(address => bool) public isExcludedFromFee;
-
-    uint256 private _burnFee;
-    uint256 private _previousBurnFee;
-
-    uint256 private _liquidityFee;
-    uint256 private _previousLiquidityFee;
-
-    uint256 private _marketingFee;
-    uint256 private _previousMarketingFee;
-
-    uint256 private _stakingFee;
-    uint256 private _previousStakingFee;
 
     uint16 public buyBurnFee = 10;
     uint16 public buyLiquidityFee = 10;
@@ -1232,7 +1215,8 @@ contract ShibnobiV2 is ERC20, Ownable {
     uint256 private lpTokens;
 
     mapping(address => bool) public automatedMarketMakerPairs;
-
+    mapping(address => bool) public botWallet;
+    address[] public botWallets;
     uint256 public minLpBeforeSwapping;
 
     IUniswapRouter02 public immutable uniswapRouter;
@@ -1247,7 +1231,7 @@ contract ShibnobiV2 is ERC20, Ownable {
         inSwapAndLiquify = false;
     }
 
-    constructor() ERC20("ShibnobiV2", "SHINJAV2") {
+    constructor() ERC20("Shibnobi", "SHINJA") {
         _mint(msg.sender, 1e11 * 10**decimals());
 
         marketingFeeAddress = payable(
@@ -1281,6 +1265,7 @@ contract ShibnobiV2 is ERC20, Ownable {
         bridgeAddress = 0x4c03Cf0301F2ef59CC2687b82f982A2A01C00Ee2;
         isExcludedFromFee[bridgeAddress] = true;
         _limits[bridgeAddress].isExcluded = true;
+        _approve(address(this), address(uniswapRouter), type(uint256).max);
     }
 
     function migrateBridge(address newAddress) external onlyOwner {
@@ -1292,6 +1277,28 @@ contract ShibnobiV2 is ERC20, Ownable {
 
     function decimals() public pure override returns (uint8) {
         return 9;
+    }
+
+    function addBotWallet(address wallet) external onlyOwner {
+        require(!botWallet[wallet], "Wallet already added");
+        botWallet[wallet] = true;
+        botWallets.push(wallet);
+    }
+
+    function removeBotWallet(address wallet) external onlyOwner {
+        require(botWallet[wallet], "Wallet not added");
+        botWallet[wallet] = false;
+        for (uint256 i = 0; i < botWallets.length; i++) {
+            if (botWallets[i] == wallet) {
+                botWallets[i] = botWallets[botWallets.length - 1];
+                botWallets.pop();
+                break;
+            }
+        }
+    }
+
+    function burn(uint256 amount) external {
+        _burn(msg.sender, amount);
     }
 
     function enableTrading() external onlyOwner {
@@ -1315,16 +1322,11 @@ contract ShibnobiV2 is ERC20, Ownable {
         return super.balanceOf(bridgeAddress);
     }
 
-    function setBridgeAddress(address a) external onlyOwner {
-        require(a != address(0), "Can't set 0");
-        bridgeAddress = a;
-    }
-
-    function updateMinLpBeforeSwapping(uint256 _minLpBeforeSwapping)
+    function updateMinLpBeforeSwapping(uint256 minLpBeforeSwapping_)
         external
         onlyOwner
     {
-        minLpBeforeSwapping = _minLpBeforeSwapping;
+        minLpBeforeSwapping = minLpBeforeSwapping_;
     }
 
     function setAutomatedMarketMakerPair(address pair, bool value)
@@ -1412,14 +1414,14 @@ contract ShibnobiV2 is ERC20, Ownable {
         _burn(msg.sender, amount);
     }
 
-    function updateMarketingFeeAddress(address a) external onlyOwner {
-        require(a != address(0), "Can't set 0");
-        marketingFeeAddress = payable(a);
+    function updateMarketingFeeAddress(address marketingFeeAddress_) external onlyOwner {
+        require(marketingFeeAddress_ != address(0), "Can't set 0");
+        marketingFeeAddress = payable(marketingFeeAddress_);
     }
 
-    function updateStakingAddress(address a) external onlyOwner {
-        require(a != address(0), "Can't set 0");
-        stakingFeeAddress = payable(a);
+    function updateStakingAddress(address stakingFeeAddress_) external onlyOwner {
+        require(stakingFeeAddress_ != address(0), "Can't set 0");
+        stakingFeeAddress = payable(stakingFeeAddress_);
     }
 
     function _transfer(
@@ -1440,11 +1442,14 @@ contract ShibnobiV2 is ERC20, Ownable {
             hasLiquidity && !inSwapAndLiquify && automatedMarketMakerPairs[to]
         ) {
             uint256 contractTokenBalance = balanceOf(address(this));
-            if (contractTokenBalance >= lpTokens * minLpBeforeSwapping / 1000)
+            if (contractTokenBalance >= lpTokens * minLpBeforeSwapping / lpDenominator)
                 takeFee(contractTokenBalance);
         }
 
-        removeAllFee();
+        uint256  _burnFee;
+        uint256  _liquidityFee;
+        uint256  _marketingFee;
+        uint256  _stakingFee;
 
         if (!isExcludedFromFee[from] && !isExcludedFromFee[to]) {
             // Buy
@@ -1495,33 +1500,6 @@ contract ShibnobiV2 is ERC20, Ownable {
             _burnFeeTokens += _burnFee;
             _stakingFeeTokens += _stakingFee;
         }
-        restoreAllFee();
-    }
-
-    function removeAllFee() private {
-        if (
-            _burnFee == 0 &&
-            _liquidityFee == 0 &&
-            _marketingFee == 0 &&
-            _stakingFee == 0
-        ) return;
-
-        _previousBurnFee = _burnFee;
-        _previousLiquidityFee = _liquidityFee;
-        _previousMarketingFee = _marketingFee;
-        _previousStakingFee = _stakingFee;
-
-        _burnFee = 0;
-        _liquidityFee = 0;
-        _marketingFee = 0;
-        _stakingFee = 0;
-    }
-
-    function restoreAllFee() private {
-        _burnFee = _previousBurnFee;
-        _liquidityFee = _previousLiquidityFee;
-        _marketingFee = _previousMarketingFee;
-        _stakingFee = _previousStakingFee;
     }
 
     function takeFee(uint256 contractBalance) private lockTheSwap {
@@ -1574,7 +1552,6 @@ contract ShibnobiV2 is ERC20, Ownable {
         address[] memory path = new address[](2);
         path[0] = address(this);
         path[1] = uniswapRouter.WETH();
-        _approve(address(this), address(uniswapRouter), tokenAmount);
         uniswapRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(
             tokenAmount,
             0,
@@ -1585,7 +1562,6 @@ contract ShibnobiV2 is ERC20, Ownable {
     }
 
     function addLiquidity(uint256 tokenAmount, uint256 ethAmount) private {
-        _approve(address(this), address(uniswapRouter), tokenAmount);
         uniswapRouter.addLiquidityETH{value: ethAmount}(
             address(this),
             tokenAmount,
@@ -1695,25 +1671,26 @@ contract ShibnobiV2 is ERC20, Ownable {
         view
         returns (uint256 sellAmount)
     {
-        uint256 numberOfSells = _limits[_address].sellAmounts.length;
+        LimitedWallet memory __limits = _limits[_address];
+        uint256 numberOfSells = __limits.sellAmounts.length;
 
         if (numberOfSells == 0) {
             return sellAmount;
         }
 
-        uint256 limitPeriod = _limits[_address].limitPeriod == 0
+        uint256 limitPeriod = __limits.limitPeriod == 0
             ? globalLimitPeriod
-            : _limits[_address].limitPeriod;
+            : __limits.limitPeriod;
         while (true) {
             if (numberOfSells == 0) {
                 break;
             }
             numberOfSells--;
-            uint256 sellTimestamp = _limits[_address].sellTimestamps[
+            uint256 sellTimestamp = __limits.sellTimestamps[
                 numberOfSells
             ];
             if (block.timestamp - limitPeriod <= sellTimestamp) {
-                sellAmount += _limits[_address].sellAmounts[numberOfSells];
+                sellAmount += __limits.sellAmounts[numberOfSells];
             } else {
                 break;
             }
@@ -1721,8 +1698,9 @@ contract ShibnobiV2 is ERC20, Ownable {
     }
 
     function checkLiquidity() internal {
-        (uint256 r1, uint256 r2, ) = uniswapV2Pair(uniswapPair).getReserves();
-        lpTokens = balanceOf(uniswapPair);
+        (uint256 r1, uint256 r2, ) = IUniswapV2Pair(uniswapPair).getReserves();
+        
+        lpTokens = balanceOf(uniswapPair); // this is not a problem, since contract sell will get that unsynced balance as if we sold it, so we just get more ETH.
         hasLiquidity = r1 > 0 && r2 > 0 ? true : false;
     }
 
@@ -1746,10 +1724,10 @@ contract ShibnobiV2 is ERC20, Ownable {
         if (
             _limits[from].isExcluded ||
             _limits[to].isExcluded ||
-            !limitsActive ||
             !hasLiquidity ||
             automatedMarketMakerPairs[from] ||
-            inSwapAndLiquify
+            inSwapAndLiquify ||
+            !limitsActive && _limits[from].limitETH == 0 // if limits are disabled and the wallet doesn't have a custom limit, we don't need to check
         ) {
             return;
         }
